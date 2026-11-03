@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_pc-common"
+[[ $# == 2 && -f "$1" && -n "$2" ]] || { echo 'Usage: pcput <local-file> <pc-path>' >&2; exit 2; }
+printf -v remote '%q' "$2"
+# Stage in the destination directory, then replace only after a full write.
+# Preserve existing permissions; refuse symlink destinations rather than changing semantics.
+"${pcssh[@]}" "set -e; dst=$remote; [ ! -L \"\$dst\" ] || { echo 'Refusing symlink destination' >&2; exit 1; }; tmp=\$(mktemp -- \"\$dst.pcbridge.XXXXXX\"); trap 'rm -f -- \"\$tmp\"' EXIT; cat > \"\$tmp\"; if [ -f \"\$dst\" ]; then chmod --reference=\"\$dst\" \"\$tmp\"; fi; mv -f -- \"\$tmp\" \"\$dst\"" < "$1"

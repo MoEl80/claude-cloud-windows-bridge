@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+bridge_home="${PC_BRIDGE_HOME:-$HOME/.config/pc-bridge}"
+[[ -s "$bridge_home/ready" && -s "$bridge_home/ssh_config" ]] || { echo 'PC-Bridge is not ready; stop and inspect the SessionStart error.' >&2; exit 1; }
+pcssh=(ssh -T -F "$bridge_home/ssh_config" pc)

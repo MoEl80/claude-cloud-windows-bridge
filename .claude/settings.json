@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash \"${CLAUDE_PROJECT_DIR:-$PWD}/.claude/hooks/pc-bridge.sh\""
+      }]
+    }]
+  }
+}

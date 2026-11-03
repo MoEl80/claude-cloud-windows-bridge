@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_pc-common"
+[[ $# == 2 && -n "$1" && -n "$2" && "$2" != '-' ]] || { echo 'Usage: pcget <pc-path> <local-path>' >&2; exit 2; }
+printf -v remote '%q' "$1"
+local_tmp=$(mktemp -- "$2.pcbridge.XXXXXX")
+trap 'rm -f -- "$local_tmp"' EXIT
+"${pcssh[@]}" "cat -- $remote" > "$local_tmp"
+mv -f -- "$local_tmp" "$2"

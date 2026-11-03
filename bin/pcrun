@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_pc-common"
+[[ $# == 1 ]] || { echo 'Usage: pcrun "bash command"' >&2; exit 2; }
+exec "${pcssh[@]}" "$1"
