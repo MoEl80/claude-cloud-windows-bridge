@@ -13,7 +13,7 @@ bridge_retry() {
 }
 
 bridge_start_daemon() {
-  # Caller supplies socket/runtime/log/as_root. This function NEVER signals a PID.
+  # Caller supplies socket/runtime/log/tailscaled_bin. This function NEVER signals a PID.
   if [[ -f "$runtime/tailscaled.pid" ]]; then
     local oldpid
     read -r oldpid < "$runtime/tailscaled.pid" || true
@@ -23,7 +23,7 @@ bridge_start_daemon() {
     fi
   fi
   rm -f -- "$socket" "$runtime/tailscaled.pid"
-  nohup "${as_root[@]}" tailscaled --tun=userspace-networking --state=mem: --socket="$socket" >>"$log" 2>&1 </dev/null &
+  nohup "$tailscaled_bin" --tun=userspace-networking --state=mem: --socket="$socket" >>"$log" 2>&1 </dev/null &
   echo "$!" > "$runtime/tailscaled.pid"
   for ((i=0; i<30; i++)); do [[ -S "$socket" ]] && return 0; sleep 1; done
   echo 'Tailscale daemon did not create its socket' >&2
