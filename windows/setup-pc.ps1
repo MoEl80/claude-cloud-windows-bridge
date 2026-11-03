@@ -7,24 +7,35 @@ param(
     [string]$GitBashPath                           # default: auto-detected Git for Windows bash.exe
 )
 $ErrorActionPreference = 'Stop'
-# Windows OpenSSH matches AllowUsers names in lowercase
+# Windows OpenSSH matches AllowUsers names in lowercase. Keep the installer and
+# cloud hook on the same deliberately narrow username grammar; whitespace would
+# be parsed by sshd as multiple AllowUsers patterns.
 $PcUser = $PcUser.ToLowerInvariant()
+if ($PcUser -notmatch '^[a-z0-9._-]+$') {
+    throw 'PcUser must contain only a-z, 0-9, dot, underscore or hyphen (no spaces) for safe OpenSSH AllowUsers configuration'
+}
 $account = Get-CimInstance Win32_UserAccount -Filter "LocalAccount=True" | Where-Object { $_.Name -eq $PcUser } | Select-Object -First 1
 if (-not $account) { throw "Local Windows account '$PcUser' not found (use the short account name shown by: whoami)" }
+$profileDir = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($account.SID)" -ErrorAction SilentlyContinue).ProfileImagePath
+if ($profileDir) { $profileDir = [Environment]::ExpandEnvironmentVariables($profileDir) }
 if (-not $PublicKeyPath) {
     # the key belongs to the bridge user, not to whoever runs this elevated window
-    $profileDir = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($account.SID)" -ErrorAction SilentlyContinue).ProfileImagePath
     if (-not $profileDir) { throw "No profile folder found for $PcUser; pass -PublicKeyPath" }
     $PublicKeyPath = Join-Path $profileDir '.ssh\cloud_bridge.pub'
 }
-if (-not (Test-Path $PublicKeyPath)) { throw "Public key not found: $PublicKeyPath (create it first, see README)" }
+if (-not (Test-Path $PublicKeyPath -PathType Leaf)) { throw "Public key not found: $PublicKeyPath (create it first, see README)" }
+$PublicKeyPath = (Resolve-Path $PublicKeyPath).Path
 if (-not $GitBashPath) {
-    $candidates = @((Join-Path $env:ProgramFiles 'Git\bin\bash.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe'))
+    $candidates = @((Join-Path $env:ProgramFiles 'Git\bin\bash.exe'))
+    # Search the target bridge user's per-user Git install, not only the elevated admin's profile.
+    if ($profileDir) { $candidates += (Join-Path $profileDir 'AppData\Local\Programs\Git\bin\bash.exe') }
+    $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe')
     $git = Get-Command git -ErrorAction SilentlyContinue
     if ($git) { $candidates += (Join-Path (Split-Path (Split-Path $git.Source -Parent) -Parent) 'bin\bash.exe') }
-    $GitBashPath = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    $GitBashPath = $candidates | Where-Object { $_ -and (Test-Path $_ -PathType Leaf) } | Select-Object -First 1
 }
-if (-not $GitBashPath -or -not (Test-Path $GitBashPath)) { throw 'Git Bash not found; install Git for Windows or pass -GitBashPath' }
+if (-not $GitBashPath -or -not (Test-Path $GitBashPath -PathType Leaf)) { throw 'Git Bash not found; install Git for Windows or pass -GitBashPath' }
+$GitBashPath = (Resolve-Path $GitBashPath).Path
 $root = Split-Path $PSScriptRoot -Parent
 $state = Join-Path $root '.state'
 New-Item -ItemType Directory -Path $state -Force | Out-Null
@@ -41,6 +52,18 @@ function Confirm-BridgeReady {
         if (-not $pending.AsyncWaitHandle.WaitOne(5000)) { throw 'SSH TCP readiness failed after 5 seconds' }
         $client.EndConnect($pending)
     } finally { $client.Dispose() }
+}
+function Set-SshdRecovery {
+    # sshd binds specifically to the Tailscale IP. At boot that address can appear
+    # after sshd first starts, so retry error stops as well as process crashes.
+    & sc.exe failure sshd reset= 86400 actions= restart/30000/restart/60000/restart/120000 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not configure sshd recovery actions' }
+    & sc.exe failureflag sshd 1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not enable sshd recovery on error stops' }
+    & sc.exe qfailure sshd | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not verify sshd recovery actions' }
+    & sc.exe qfailureflag sshd | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not verify sshd recovery failure flag' }
 }
 function Show-HostKey {
     # print the PC's own host key so the cloud pin does not depend on a network scan
@@ -78,6 +101,7 @@ try {
         if ($stock -and $stock.Enabled -eq 'True') { throw 'Generic OpenSSH inbound firewall rule is enabled' }
         & "$env:WINDIR\System32\OpenSSH\sshd.exe" -t -f $cfg
         if ($LASTEXITCODE -ne 0) { throw 'Installed SSH configuration is invalid' }
+        Set-SshdRecovery
         Confirm-BridgeReady $PcHost
         @{ pcHost=$PcHost; pcUser=$PcUser; verified=(Get-Date -Format o); resumed=$true } | ConvertTo-Json | Set-Content $marker -Encoding ascii
         Show-HostKey
@@ -138,8 +162,7 @@ Subsystem sftp sftp-server.exe
     Get-NetFirewallRule -Name OpenSSH-Server-In-TCP -ErrorAction SilentlyContinue | Disable-NetFirewallRule
     New-NetFirewallRule -Name PC-Bridge-SSH -DisplayName 'PC-Bridge SSH (Tailscale only)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 22 -LocalAddress $PcHost -RemoteAddress '100.64.0.0/10' -Profile Any | Out-Null
     Set-Service sshd -StartupType Automatic
-    # sshd binds to the Tailscale IP; if it starts before Tailscale has that address, let Windows retry it
-    & sc.exe failure sshd reset= 86400 actions= restart/30000/restart/60000/restart/120000 | Out-Null
+    Set-SshdRecovery
     Confirm-BridgeReady $PcHost
     @{ pcHost=$PcHost; pcUser=$PcUser; installed=(Get-Date -Format o); defaultShellPreviouslyAbsent=$true } | ConvertTo-Json | Set-Content $marker -Encoding ascii
     Get-Service sshd | Select-Object Name,Status,StartType
