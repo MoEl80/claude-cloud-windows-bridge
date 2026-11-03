@@ -59,7 +59,14 @@ if [[ "$ts_have" != "$TAILSCALE_VERSION" ]]; then
   ts_url="https://pkgs.tailscale.com/stable/$ts_archive"
   curl -fsSL --connect-timeout 15 --max-time 180 --retry 3 "$ts_url" -o "$ts_tmp/$ts_archive"
   curl -fsSL --connect-timeout 15 --max-time 60 --retry 3 "$ts_url.sha256" -o "$ts_tmp/$ts_archive.sha256"
-  (cd "$ts_tmp" && sha256sum -c "$ts_archive.sha256") >>"$log" 2>&1
+  IFS= read -r ts_want < "$ts_tmp/$ts_archive.sha256" || true
+  ts_want=${ts_want//$'\r'/}
+  ts_want=${ts_want//[[:space:]]/}
+  [[ "$ts_want" =~ ^[0-9A-Fa-f]{64}$ ]] || { err 'Tailscale checksum file was not a 64-character SHA256'; exit 1; }
+  ts_have_hash=$(sha256sum -- "$ts_tmp/$ts_archive")
+  ts_have_hash=${ts_have_hash%% *}
+  [[ "${ts_have_hash,,}" == "${ts_want,,}" ]] || { err 'pinned Tailscale archive SHA256 mismatch'; exit 1; }
+  printf 'Tailscale archive sha256 verified: %s\n' "$ts_have_hash" >>"$log"
   tar -xzf "$ts_tmp/$ts_archive" -C "$ts_tmp"
   extracted="$ts_tmp/tailscale_${TAILSCALE_VERSION}_${ts_arch}"
   [[ -x "$extracted/tailscale" && -x "$extracted/tailscaled" ]] || { err 'pinned Tailscale archive did not contain the expected binaries'; exit 1; }
