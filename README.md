@@ -1,17 +1,21 @@
 # Claude Cloud Windows Bridge
 
-**Windows PC access for Claude Code cloud sessions.** A Claude Code cloud session (claude.ai/code) runs commands and edits the real files on **your own Windows PC** over Tailscale + SSH. Nothing is synced or cloned. The cloud session is only a thin launcher.
+**Windows PC access for Claude Code cloud sessions.** A Claude Code cloud session (claude.ai/code) runs commands and edits the real files on **your own Windows PC** over Tailscale + SSH. Your project is not mirrored to the cloud: the agent fetches the files it needs on demand, and the master copies stay on your PC. Only this small launcher repo runs in the cloud VM.
+
+*Unofficial community project. Not affiliated with or endorsed by Anthropic or Tailscale.*
 
 ## Why this exists
 
-Claude has a built-in way to let cloud work reach a folder on your computer: Remote Control. You add a folder in the desktop app (Settings → Code → "Use this computer from your phone and claude.ai") or run `claude remote-control` in it, and a cloud project can then "work locally" there ([docs](https://code.claude.com/docs/en/claude-projects.md#run-a-thread-on-your-own-computer)).
+Claude's built-in option is **Remote Control**: Claude Code keeps running **on your own computer**, and claude.ai or the phone app becomes a remote screen for it ([docs](https://code.claude.com/docs/en/remote-control.md)). A cloud project can also hand a task to a folder you share that way ([docs](https://code.claude.com/docs/en/claude-projects.md#run-a-thread-on-your-own-computer)). This bridge is different: the session runs **in Anthropic's cloud** and reaches into your PC over SSH.
 
-**On Windows that path did not work for us.** On a Windows 11 PC with Claude Code 2.1.316 (the docs require 2.1.280 or later) and the Claude desktop app 4.4212, in November 2026, the folder appeared in the Remote Control list. Cloud sessions reported it as *"not available ... on Windows, [the app needs] a version that serves folders there"*. So a cloud session had no way into the PC.
+**In our Windows test the desktop folder-sharing path failed.** This was in November 2026, on Windows 11 with Claude Code 2.1.316 (the docs require 2.1.280 or later) and the Claude desktop app 4.4212. The folder appeared in the Remote Control list, but cloud sessions reported it as *"not available ... on Windows, [the app needs] a version that serves folders there"*. This is a version-specific result, not a claim that Remote Control doesn't support Windows; `claude remote-control` from a terminal may behave differently.
+
+Team and Enterprise users should also look at Anthropic's official [self-hosted environments](https://code.claude.com/docs/en/self-hosted-environments). This project is for people who want a Claude-hosted cloud session working on a personal Windows PC.
 
 There are other reasons to want it anyway:
 
 - Remote Control needs the Claude app or `claude remote-control` running on the PC, and each connection is approved one folder at a time.
-- This bridge needs only Windows' own OpenSSH service and Tailscale. A session reaches the whole PC: any folder, any drive, PowerShell and installed programs.
+- This bridge needs only Windows' own OpenSSH service and Tailscale. A session can reach anything the configured Windows account is allowed to access, including PowerShell and installed programs.
 
 On Linux or Mac a plain SSH setup takes about five minutes. Windows is where it gets hard:
 
@@ -31,8 +35,8 @@ When a cloud session starts on this repo, its SessionStart hook connects the VM 
 | Helper | What it does |
 |---|---|
 | `pcrun "cd /c/work/app && git status"` | Runs one shell command on the PC (Git Bash) |
-| `pcget /c/path/file.txt ./file.txt` | Copies a PC file into the VM |
-| `pcput ./file.txt /c/path/file.txt` | Writes a file back to the PC. It stages the file next to the destination and refuses symlinks |
+| `pcget /c/path/file.txt ./file.txt` | Copies a PC file into the VM and prints its sha256 |
+| `pcput [--expect-sha256 <hash>] ./file.txt /c/path/file.txt` | Writes a file back to the PC. It stages the file next to the destination, refuses symlinks and folders and, with `--expect-sha256`, refuses if the PC copy changed since `pcget`. Windows ACLs and other metadata are not guaranteed to survive. |
 
 Tested from two fresh cloud VMs: `whoami`, `hostname` and PowerShell work, and a 64 KB binary file survives a `pcput`/`pcget` round trip byte for byte.
 
@@ -40,57 +44,77 @@ Tested from two fresh cloud VMs: `whoami`, `hostname` and PowerShell work, and a
 
 - **Remote Control's folder connection doesn't work on your Windows PC**, or you don't want the Claude app running there. If it does work for you, it is simpler than this bridge.
 - **Start work from your phone or any browser.** Your PC keeps the master files.
-- **Not tied to Claude.** The hook is Claude Code specific, but `bin/` and `windows/setup-pc.ps1` work for any CI job, agent or script that can run bash on Linux.
+- **The approach is not Claude-specific.** `windows/setup-pc.ps1` works for any client, and other agents can reuse `bin/` after recreating what the hook sets up (`~/.config/pc-bridge`).
 
 It does not save money by itself. A cloud session uses the same plan usage as running Claude Code locally.
 
-> **Note on the 2026 cloud-session credit:** Anthropic gave Pro and Max subscribers a one-time credit for Claude Code cloud sessions, which expires on 4 November 2026 (US Pacific time). If you still have some, spend it before then. This bridge points that work at your real PC. Check the balance in claude.ai → Settings → Usage.
+> *Dated note (November 2026):* Anthropic gave Pro and Max subscribers a one-time credit for Claude Code cloud sessions, reported to expire on 4 November 2026 (US Pacific time). Check your balance in claude.ai → Settings → Usage.
 
-## What access this grants
+## Security: read this before setup
 
-A session that connects runs commands **as your Windows user, on the whole PC**: every folder and every installed program. If that user is an administrator, the session is elevated too. Only use it with sessions you control.
+A connected cloud session runs commands **as the Windows account you choose**. It can do anything that account can do. In our test, an administrator account got full administrator rights over SSH, so **don't use your own admin account**.
 
-The network exposure is kept small:
+The cloud VM holds two credentials: the **SSH private key** and a **Tailscale auth key**. Anything that runs in that session, including untrusted repository code or dependencies, could read them. Treat the cloud environment like handing the agent a key to that Windows account.
 
-- `sshd` listens only on your Tailscale IP.
-- The firewall rule allows only `100.64.0.0/10` (your tailnet).
-- Key authentication only; no passwords.
-- `AllowUsers` lists one user.
-- Forwarding is disabled.
-- The cloud side pins your host key and runs Tailscale in userspace with in-memory state, as an ephemeral node.
+Do this:
 
-## Setup (about 15 minutes)
+1. **Create a dedicated standard (non-admin) Windows account**, for example `claude-bridge`, and give it access only to the folders it should work in. Use it as `-PcUser`.
+2. **Give the cloud VM its own Tailscale identity, allowed only to reach the PC on port 22.**
+   - Create the auth key with a tag, for example `tag:claude-bridge`, set to **Ephemeral**, with the shortest practical expiry.
+   - In your tailnet policy, allow only `tag:claude-bridge` → the PC (for example `tag:claude-bridge-target`) on `tcp:22`, and make sure no broader rule also applies.
+   - Without such a policy, a new tailnet usually lets devices reach each other freely.
+3. **Use a private fork of this repo and a private cloud environment.** Use a unique SSH key for this bridge only.
+4. **Don't keep unrelated secrets** in folders the bridge account can read.
+
+What the setup locks down on the PC:
+
+- `sshd` listens only on the PC's Tailscale address.
+- The firewall accepts TCP/22 on that address only from Tailscale addresses (`100.64.0.0/10`). Which tailnet devices may connect is decided by your Tailscale policy (step 2).
+- Key authentication only; one allowed user; forwarding disabled.
+- The cloud side pins the PC's host key and runs Tailscale in userspace with in-memory state, as an ephemeral node.
+
+## Setup (typically 15-30 minutes)
+
+The PC must be on, awake and connected to Tailscale whenever you use the bridge.
 
 ### On the Windows PC
 
-1. Install [Tailscale](https://tailscale.com/download) and sign in. Note the PC's Tailscale IP (`tailscale ip -4`, for example `100.x.y.z`).
+1. Install [Tailscale](https://tailscale.com/download) and sign in. Note the PC's Tailscale IP (`tailscale ip -4`, for example `100.x.y.z`). Tag the PC in the Tailscale admin console, for example `tag:claude-bridge-target`.
 2. Install [Git for Windows](https://git-scm.com/download/win). Git Bash becomes the SSH shell.
-3. Create the bridge key **in Git Bash**:
+3. Sign in to the **bridge account** (step 1 of the security section). Then create the bridge key **in Git Bash**:
    ```bash
+   mkdir -p ~/.ssh && chmod 700 ~/.ssh
    ssh-keygen -t ed25519 -N "" -C pc-bridge -f ~/.ssh/cloud_bridge
    ```
-4. Clone this repo, open **PowerShell as Administrator** in it, and run:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\windows\setup-pc.ps1 -PcHost 100.x.y.z -PcUser yourwindowsuser
+4. Clone this repo:
+   ```bash
+   git clone https://github.com/MoEl80/claude-cloud-windows-bridge
    ```
+   Then open **Windows PowerShell as Administrator** in that folder and run the following. Use the short account name that `whoami` shows; it's lowercased for you.
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\windows\setup-pc.ps1 -PcHost 100.x.y.z -PcUser claude-bridge
+   ```
+   If the key isn't in that account's `.ssh` folder, add `-PublicKeyPath`. For a non-standard Git location, add `-GitBashPath`.
    This script:
    - installs OpenSSH Server and writes a dedicated `sshd_config` (Tailscale IP, keys only, one user);
    - authorizes `cloud_bridge.pub`;
    - fixes host-key ACLs;
    - sets Git Bash as the default shell;
    - adds a Tailscale-only firewall rule;
-   - disables the generic OpenSSH rule.
+   - disables the generic OpenSSH rule;
+   - tells Windows to restart `sshd` if it starts before Tailscale is ready;
+   - prints `PC_SSH_HOSTKEY_B64` from the PC's own host key, so you never pin a key from a network scan.
 
-   It refuses to touch an existing SSH setup that it doesn't recognise.
+   It refuses to touch an existing SSH setup that it doesn't recognise. Installing OpenSSH can occasionally require a reboot: then reboot and run it again.
+5. Test it locally before going to the cloud: `ssh -i ~/.ssh/cloud_bridge claude-bridge@100.x.y.z hostname` should print the PC's name.
 
-### Collect the five values (in Git Bash on the PC)
+### Collect the five values
 
-```bash
-base64 -w0 ~/.ssh/cloud_bridge; echo                  # -> PC_SSH_KEY_B64
-ssh-keyscan -t ed25519 100.x.y.z | base64 -w0; echo   # -> PC_SSH_HOSTKEY_B64
-```
-
-Create an auth key in the Tailscale admin console with **Reusable** and **Ephemeral** turned on. That gives `TS_AUTHKEY`.
+- `PC_SSH_HOSTKEY_B64`: printed by `setup-pc.ps1`.
+- `PC_SSH_KEY_B64`: in Git Bash, run `base64 -w0 ~/.ssh/cloud_bridge; echo`.
+- `TS_AUTHKEY`: create an auth key in the Tailscale admin console with your tag, **Ephemeral** on, and a short expiry. Turn on **Reusable** only if you want every cloud session to reuse it.
+- `PC_HOST`: the PC's Tailscale IP.
+- `PC_USER`: the bridge account name.
 
 ### On claude.ai/code
 
@@ -112,9 +136,17 @@ If the hook fails, the agent is told to stop. The log is in the VM at `~/.cache/
 
 ## Turning it off
 
-- **Pause:** stop the `sshd` service, or disable the `PC-Bridge-SSH` firewall rule.
-- **Cut off cloud access:** revoke the Tailscale auth key and delete the environment variables.
-- **Uninstall:** remove the OpenSSH Server capability, the `PC-Bridge-SSH` firewall rule, `HKLM:\SOFTWARE\OpenSSH\DefaultShell`, and `~/.ssh/cloud_bridge*`.
+**Pause:** stop the `sshd` service, or disable the `PC-Bridge-SSH` firewall rule.
+
+**Emergency cut-off**, if a key may have leaked. Do these in this order:
+1. On the PC, stop `sshd`, or disable the `PC-Bridge-SSH` firewall rule.
+2. Empty or replace `C:\ProgramData\ssh\pc_bridge_authorized_keys`.
+3. In the Tailscale admin console, **delete the `claude-cloud-*` machines**. Revoking an auth key does not disconnect nodes that already joined.
+4. Revoke the Tailscale auth key.
+5. Delete the cloud environment's variables, and end any running cloud sessions.
+6. Before turning the bridge on again, create a new SSH key and run `setup-pc.ps1` again.
+
+**Uninstall:** remove the OpenSSH Server capability, the `PC-Bridge-SSH` firewall rule, `HKLM:\SOFTWARE\OpenSSH\DefaultShell` and `DefaultShellCommandOption` (note that these are machine-wide settings), `C:\ProgramData\ssh\sshd_config` and `pc_bridge_authorized_keys`, `~/.ssh/cloud_bridge*`, and the repo's `.state` folder.
 
 ## Lessons from building it
 

@@ -28,8 +28,8 @@ as_root=(); [[ $(id -u) == 0 ]] || as_root=(sudo -n)
 
 if ! command -v tailscale >/dev/null || ! command -v tailscaled >/dev/null; then
   installer=$(mktemp)
-  curl -fsSL https://tailscale.com/install.sh -o "$installer"
-  "${as_root[@]}" sh "$installer" >>"$log" 2>&1
+  curl -fsSL --connect-timeout 15 --max-time 120 --retry 3 https://tailscale.com/install.sh -o "$installer"
+  timeout 300 "${as_root[@]}" sh "$installer" >>"$log" 2>&1
   rm -f -- "$installer"
 fi
 command -v tailscale >/dev/null || { err 'could not install tailscale'; exit 1; }
@@ -48,17 +48,17 @@ socket="$runtime/tailscaled.sock"
 # returns nonzero; do not blindly kill a PID from a file (PIDs can be reused).
 ts_sock_ok() {
   [[ -S "$socket" ]] || return 1
-  tailscale --socket="$socket" status --json > "$runtime/status.json" 2>>"$log" || true
+  timeout 10 tailscale --socket="$socket" status --json > "$runtime/status.json" 2>>"$log" || true
   grep -q '"BackendState"[[:space:]]*:' "$runtime/status.json"
 }
 if ! ts_sock_ok; then bridge_start_daemon; fi
 
 # never assume tailscale up succeeds once. A session start runs it every
 # time the daemon is not logged in, with retries, and fails loudly otherwise.
-ts_logged_in() { tailscale --socket="$socket" status --json 2>/dev/null | grep -q '"BackendState"[ ]*:[ ]*"Running"'; }
+ts_logged_in() { timeout 10 tailscale --socket="$socket" status --json 2>/dev/null | grep -q '"BackendState"[ ]*:[ ]*"Running"'; }
 ts_login_once() {
   if ts_logged_in; then return 0; fi
-  if ! tailscale --socket="$socket" up --auth-key="$TS_AUTHKEY" --hostname="claude-cloud-${HOSTNAME:-vm}" --accept-dns=false >>"$log" 2>&1; then
+  if ! timeout 60 tailscale --socket="$socket" up --auth-key="$TS_AUTHKEY" --hostname="claude-cloud-${HOSTNAME:-vm}" --accept-dns=false >>"$log" 2>&1; then
     echo 'PC-Bridge: tailscale up failed (see log)' >>"$log"
     return 1
   fi
@@ -68,9 +68,11 @@ ts_login_once() {
 bridge_retry 5 2 ts_login_once || { err 'Tailscale login failed after 5 attempts (auth key or network?)'; exit 1; }
 
 key_tmp=$(mktemp "$bridge_home/key.XXXXXX")
+trap 'rm -f -- "${key_tmp:-}"' EXIT   # never leave a decoded key behind if a step below fails
 printf '%s' "$PC_SSH_KEY_B64" | base64 -d > "$key_tmp"
 ssh-keygen -y -P '' -f "$key_tmp" >/dev/null
 mv -f -- "$key_tmp" "$bridge_home/key"
+key_tmp=''
 printf '%s' "$PC_SSH_HOSTKEY_B64" | base64 -d > "$bridge_home/known_hosts"
 # Keep the proxy command in its own script so SSH path spaces are handled correctly.
 printf '#!/usr/bin/env bash\nexec %q --socket=%q nc "$@"\n' "$(command -v tailscale)" "$socket" > "$bridge_home/proxy"
@@ -93,7 +95,7 @@ chmod 600 "$bridge_home/ssh_config" "$bridge_home/key" "$bridge_home/known_hosts
 # verify SSH with retries; Tailscale can take seconds to become usable.
 host=''
 for attempt in 1 2 3 4 5; do
-  host=$(ssh -T -F "$bridge_home/ssh_config" pc hostname 2>>"$log") && break
+  host=$(timeout 30 ssh -T -F "$bridge_home/ssh_config" pc hostname 2>>"$log") && break
   sleep 2
 done
 [[ -n "$host" ]] || { err 'could not reach PC over SSH'; exit 1; }
