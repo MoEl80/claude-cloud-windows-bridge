@@ -1,6 +1,6 @@
 # Claude Cloud Windows Bridge
 
-**Windows PC access for Claude Code cloud sessions.** A cloud session (claude.ai/code), or any Linux cloud VM, runs commands and edits the real files on **your own Windows PC** over Tailscale + SSH. Nothing is synced or cloned. The cloud VM is only a thin launcher.
+**Windows PC access for Claude Code cloud sessions.** A Claude Code cloud session (claude.ai/code) runs commands and edits the real files on **your own Windows PC** over Tailscale + SSH. Nothing is synced or cloned. The cloud session is only a thin launcher.
 
 ## Why this exists
 
