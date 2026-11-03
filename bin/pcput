@@ -4,7 +4,7 @@ expect=''
 if [[ "${1:-}" == --expect-sha256 ]]; then expect="${2:-}"; shift 2; [[ "$expect" =~ ^[0-9a-f]{64}$ ]] || { echo 'pcput: --expect-sha256 needs a 64-character hex hash' >&2; exit 2; }; fi
 [[ $# == 2 && -f "$1" && -n "$2" ]] || { echo 'Usage: pcput [--expect-sha256 <hash-from-pcget>] <local-file> <pc-path>' >&2; exit 2; }
 printf -v remote '%q' "$2"
-# Stage in the destination directory, then replace only after a full write.
-# Keeps the Git-Bash-visible file mode; Windows ACLs and other metadata are not guaranteed to survive.
-# Refuses symlinks and folders as destinations; with --expect-sha256, refuses if the PC copy changed.
-"${pcssh[@]}" "set -e; dst=$remote; [ ! -L \"\$dst\" ] || { echo 'Refusing symlink destination' >&2; exit 1; }; [ ! -d \"\$dst\" ] || { echo 'Refusing: destination is a folder' >&2; exit 1; }; if [ -n '$expect' ]; then cur=\$(sha256sum -- \"\$dst\" 2>/dev/null | cut -d' ' -f1); [ \"\$cur\" = '$expect' ] || { echo 'Refusing: the PC file changed since you read it (pcget it again)' >&2; exit 1; }; fi; tmp=\$(mktemp -- \"\$dst.pcbridge.XXXXXX\"); trap 'rm -f -- \"\$tmp\"' EXIT; cat > \"\$tmp\"; if [ -f \"\$dst\" ]; then chmod --reference=\"\$dst\" \"\$tmp\"; fi; mv -f -- \"\$tmp\" \"\$dst\"" < "$1"
+# Stage the full upload beside the destination first. Only after staging do we
+# re-check destination type/hash, reducing the stale-write race to the final
+# check -> rename window. This is optimistic concurrency protection, not a lock.
+"${pcssh[@]}" "set -e; dst=$remote; tmp=\$(mktemp -- \"\$dst.pcbridge.XXXXXX\"); trap 'rm -f -- \"\$tmp\"' EXIT; cat > \"\$tmp\"; [ ! -L \"\$dst\" ] || { echo 'Refusing symlink destination' >&2; exit 1; }; [ ! -d \"\$dst\" ] || { echo 'Refusing: destination is a folder' >&2; exit 1; }; if [ -n '$expect' ]; then cur=\$(sha256sum -- \"\$dst\" 2>/dev/null | cut -d' ' -f1); [ \"\$cur\" = '$expect' ] || { echo 'Refusing: the PC file changed since you read it (pcget it again)' >&2; exit 1; }; fi; if [ -f \"\$dst\" ]; then chmod --reference=\"\$dst\" \"\$tmp\"; fi; mv -f -- \"\$tmp\" \"\$dst\"" < "$1"
