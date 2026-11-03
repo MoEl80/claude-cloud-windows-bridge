@@ -1,6 +1,6 @@
 # Claude Cloud Windows Bridge
 
-**Windows PC access for Claude Code cloud sessions.** A Claude Code cloud session (claude.ai/code) runs commands and edits the real files on **your own Windows PC** over Tailscale + SSH. Your project is not mirrored to the cloud: the agent fetches the files it needs on demand, and the master copies stay on your PC. Only this small launcher repo runs in the cloud VM.
+**Run Claude Code cloud sessions against the real files and tools on your own Windows PC over Tailscale + SSH.** A Claude Code cloud session (claude.ai/code) runs commands and edits the real files on **your own Windows PC** over Tailscale + SSH. Your project is not mirrored to the cloud: the agent fetches the files it needs on demand, and the master copies stay on your PC. Only this small launcher repo runs in the cloud VM.
 
 *Unofficial community project. Not affiliated with or endorsed by Anthropic or Tailscale.*
 
@@ -38,7 +38,10 @@ When a cloud session starts on this repo, its SessionStart hook connects the VM 
 | `pcget /c/path/file.txt ./file.txt` | Copies a PC file into the VM and prints its sha256 |
 | `pcput [--expect-sha256 <hash>] ./file.txt /c/path/file.txt` | Writes a file back to the PC. It stages the full upload first, refuses symlinks and folders, then checks the expected sha256 immediately before replacement. This protects against normal stale edits but is not a filesystem lock. Windows ACLs and other metadata are not guaranteed to survive. |
 
-Tested from two fresh cloud VMs: `whoami`, `hostname` and PowerShell work, and a 64 KB binary file survives a `pcput`/`pcget` round trip byte for byte.
+Validation so far:
+
+- **Earlier real cloud testing:** in two fresh cloud VMs, `whoami`, `hostname` and PowerShell worked, and a 64 KB binary file survived a `pcput`/`pcget` round trip byte for byte. This was before the pinned-Tailscale change.
+- **November 2026 hardening update:** bash syntax checks, Windows PowerShell parser checks, and a Tailscale 1.104.5 archive download/checksum/layout test passed. The pinned client has not yet been re-tested across many fresh cloud VMs.
 
 ## When to use it
 
@@ -105,7 +108,7 @@ The PC must be on, awake and connected to Tailscale whenever you use the bridge.
    - sets Git Bash as the default OpenSSH shell;
    - adds a Tailscale-only firewall rule;
    - disables the generic OpenSSH rule;
-   - configures Windows service recovery, including recovery on non-zero error stops, so `sshd` can retry if it starts before Tailscale owns its address;
+   - configures Windows service recovery (`sc.exe failure` plus `failureflag 1`, checked with `qfailure`/`qfailureflag`) so `sshd` can retry if it starts before Tailscale owns its address. A real reboot test with Tailscale starting late has not been done yet;
    - prints `PC_SSH_HOSTKEY_B64` from the PC's own host key, so you never pin a key from a network scan.
 
    It refuses to touch an existing SSH setup that it doesn't recognise. Installing OpenSSH can occasionally require a reboot: then reboot and run it again.
