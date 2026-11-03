@@ -20,13 +20,13 @@ There are other reasons to want it anyway:
 On Linux or Mac a plain SSH setup takes about five minutes. Windows is where it gets hard:
 
 - OpenSSH Server has to be installed and configured.
-- Host-key ACLs crash the service (error 1067).
+- Host-key ACLs can stop the service with error 1067 if they are wrong.
 - A bash shell is needed so commands behave the same as on Linux.
 - The firewall has to be locked to your tailnet.
 
 This repo is that recipe, tested end to end.
 
-```
+```text
 cloud VM ──Tailscale (userspace)──▶ your PC: OpenSSH (Tailscale IP only) ──▶ Git Bash as you
 ```
 
@@ -36,7 +36,7 @@ When a cloud session starts on this repo, its SessionStart hook connects the VM 
 |---|---|
 | `pcrun "cd /c/work/app && git status"` | Runs one shell command on the PC (Git Bash) |
 | `pcget /c/path/file.txt ./file.txt` | Copies a PC file into the VM and prints its sha256 |
-| `pcput [--expect-sha256 <hash>] ./file.txt /c/path/file.txt` | Writes a file back to the PC. It stages the file next to the destination, refuses symlinks and folders and, with `--expect-sha256`, refuses if the PC copy changed since `pcget`. Windows ACLs and other metadata are not guaranteed to survive. |
+| `pcput [--expect-sha256 <hash>] ./file.txt /c/path/file.txt` | Writes a file back to the PC. It stages the full upload first, refuses symlinks and folders, then checks the expected sha256 immediately before replacement. This protects against normal stale edits but is not a filesystem lock. Windows ACLs and other metadata are not guaranteed to survive. |
 
 Tested from two fresh cloud VMs: `whoami`, `hostname` and PowerShell work, and a 64 KB binary file survives a `pcput`/`pcget` round trip byte for byte.
 
@@ -44,7 +44,7 @@ Tested from two fresh cloud VMs: `whoami`, `hostname` and PowerShell work, and a
 
 - **Remote Control's folder connection doesn't work on your Windows PC**, or you don't want the Claude app running there. If it does work for you, it is simpler than this bridge.
 - **Start work from your phone or any browser.** Your PC keeps the master files.
-- **The approach is not Claude-specific.** `windows/setup-pc.ps1` works for any client, and other agents can reuse `bin/` after recreating what the hook sets up (`~/.config/pc-bridge`).
+- **The approach is not Claude-specific.** `windows/setup-pc.ps1` works for any SSH client, and other agents can reuse `bin/` after recreating what the hook sets up (`~/.config/pc-bridge`).
 
 It does not save money by itself. A cloud session uses the same plan usage as running Claude Code locally.
 
@@ -58,9 +58,10 @@ The cloud VM holds two credentials: the **SSH private key** and a **Tailscale au
 
 Do this:
 
-1. **Create a dedicated standard (non-admin) Windows account**, for example `claude-bridge`, and give it access only to the folders it should work in. Use it as `-PcUser`.
+1. **Create a dedicated standard (non-admin) Windows account**, for example `claude-bridge`, and give it access only to the folders it should work in. Use it as `-PcUser`. For this bridge, the short account name must use only letters, numbers, `.`, `_` or `-` — no spaces.
 2. **Give the cloud VM its own Tailscale identity, allowed only to reach the PC on port 22.**
-   - Create the auth key with a tag, for example `tag:claude-bridge`, set to **Ephemeral**, with the shortest practical expiry.
+   - Create the auth key with a tag, for example `tag:claude-bridge`.
+   - Set the key to **Reusable + Ephemeral**, with the shortest practical expiry. Reusable is required here because every fresh cloud VM starts Tailscale with in-memory state and therefore joins as a new node.
    - In your tailnet policy, allow only `tag:claude-bridge` → the PC (for example `tag:claude-bridge-target`) on `tcp:22`, and make sure no broader rule also applies.
    - Without such a policy, a new tailnet usually lets devices reach each other freely.
 3. **Use a private fork of this repo and a private cloud environment.** Use a unique SSH key for this bridge only.
@@ -71,7 +72,8 @@ What the setup locks down on the PC:
 - `sshd` listens only on the PC's Tailscale address.
 - The firewall accepts TCP/22 on that address only from Tailscale addresses (`100.64.0.0/10`). Which tailnet devices may connect is decided by your Tailscale policy (step 2).
 - Key authentication only; one allowed user; forwarding disabled.
-- The cloud side pins the PC's host key and runs Tailscale in userspace with in-memory state, as an ephemeral node.
+- The cloud side pins the PC's host key.
+- The cloud hook runs a **pinned Tailscale 1.104.5 static client** in userspace with in-memory state. It downloads the matching archive and SHA256 file from Tailscale's stable package server and verifies the archive before use; it does not execute Tailscale's changing `install.sh` as root.
 
 ## Setup (typically 15-30 minutes)
 
@@ -90,19 +92,20 @@ The PC must be on, awake and connected to Tailscale whenever you use the bridge.
    ```bash
    git clone https://github.com/MoEl80/claude-cloud-windows-bridge
    ```
-   Then open **Windows PowerShell as Administrator** in that folder and run the following. Use the short account name that `whoami` shows; it's lowercased for you.
+   Then open **Windows PowerShell as Administrator** in that folder and run the following. Use the short account name that `whoami` shows; it is lowercased for you and must not contain spaces.
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\windows\setup-pc.ps1 -PcHost 100.x.y.z -PcUser claude-bridge
    ```
    If the key isn't in that account's `.ssh` folder, add `-PublicKeyPath`. For a non-standard Git location, add `-GitBashPath`.
    This script:
    - installs OpenSSH Server and writes a dedicated `sshd_config` (Tailscale IP, keys only, one user);
-   - authorizes `cloud_bridge.pub`;
+   - authorizes `cloud_bridge.pub` from the target user's profile;
    - fixes host-key ACLs;
-   - sets Git Bash as the default shell;
+   - auto-detects Git Bash, including a per-user Git install for the target account;
+   - sets Git Bash as the default OpenSSH shell;
    - adds a Tailscale-only firewall rule;
    - disables the generic OpenSSH rule;
-   - tells Windows to restart `sshd` if it starts before Tailscale is ready;
+   - configures Windows service recovery, including recovery on non-zero error stops, so `sshd` can retry if it starts before Tailscale owns its address;
    - prints `PC_SSH_HOSTKEY_B64` from the PC's own host key, so you never pin a key from a network scan.
 
    It refuses to touch an existing SSH setup that it doesn't recognise. Installing OpenSSH can occasionally require a reboot: then reboot and run it again.
@@ -112,7 +115,7 @@ The PC must be on, awake and connected to Tailscale whenever you use the bridge.
 
 - `PC_SSH_HOSTKEY_B64`: printed by `setup-pc.ps1`.
 - `PC_SSH_KEY_B64`: in Git Bash, run `base64 -w0 ~/.ssh/cloud_bridge; echo`.
-- `TS_AUTHKEY`: create an auth key in the Tailscale admin console with your tag, **Ephemeral** on, and a short expiry. Turn on **Reusable** only if you want every cloud session to reuse it.
+- `TS_AUTHKEY`: create a **tagged, Reusable + Ephemeral** auth key in the Tailscale admin console with a short expiry. Every fresh cloud VM is a new in-memory Tailscale node, so a one-off key will work only once.
 - `PC_HOST`: the PC's Tailscale IP.
 - `PC_USER`: the bridge account name.
 
@@ -120,9 +123,9 @@ The PC must be on, awake and connected to Tailscale whenever you use the bridge.
 
 1. Fork this repo (private is fine) and connect it to Claude Code on the web.
 2. Create or edit a cloud environment:
-   - **Network access:** full. The VM must reach Tailscale.
+   - **Network access:** full. The VM must reach Tailscale's package/control services and your tailnet.
    - **Environment variables:**
-     ```
+     ```text
      TS_AUTHKEY=tskey-auth-...
      PC_HOST=100.x.y.z
      PC_USER=yourwindowsuser
@@ -151,7 +154,8 @@ If the hook fails, the agent is told to stop. The log is in the VM at `~/.cache/
 ## Lessons from building it
 
 - In cloud sessions `CLAUDE_PROJECT_DIR` can be empty, so the hook derives the repo root from its own path.
-- Some cloud images ship without an SSH client, so the hook installs `openssh-client` when it's missing.
+- Some cloud images ship without an SSH client, so the hook installs `openssh-client` when it's missing; those package-manager calls have hard timeouts.
+- The bridge uses a pinned Tailscale static build rather than running a changing remote install script as root. When intentionally upgrading it, change `TAILSCALE_VERSION` in `.claude/hooks/pc-bridge.sh` and test a fresh cloud VM.
 - `tailscale up` can fail on the first try in a fresh VM, so the hook retries the login and the SSH check.
 - On Windows, host keys generated by an elevated user kept that user's ACE, and the SYSTEM `sshd` service failed with error 1067. Fix: make Administrators the owner of the private host keys and remove that one ACE.
 - `Get-NetTCPConnection` reported no listener while SSH worked. Judge with a real TCP connect and an actual SSH login.
