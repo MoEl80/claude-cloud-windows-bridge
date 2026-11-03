@@ -1,8 +1,26 @@
 # Claude Cloud Windows Bridge
 
-**Windows PC access for cloud coding agents.** A Claude Code cloud session (claude.ai/code), or any Linux cloud VM, runs commands and edits the real files on **your own Windows PC** over Tailscale + SSH. Nothing is synced or cloned. The cloud VM is only a thin launcher.
+**Windows PC access for Claude Code cloud sessions.** A cloud session (claude.ai/code), or any Linux cloud VM, runs commands and edits the real files on **your own Windows PC** over Tailscale + SSH. Nothing is synced or cloned. The cloud VM is only a thin launcher.
 
-On Linux or Mac this is a five-minute job. Windows is where it gets hard: OpenSSH Server, host-key ACLs that crash the service, a bash shell so commands behave the same as on Linux, and a firewall locked to your tailnet. This repo is that recipe, tested end to end.
+## Why this exists
+
+Claude has a built-in way to let cloud work reach a folder on your computer: Remote Control. You add a folder in the desktop app (Settings → Code → "Use this computer from your phone and claude.ai") or run `claude remote-control` in it, and a cloud project can then "work locally" there ([docs](https://code.claude.com/docs/en/claude-projects.md#run-a-thread-on-your-own-computer)).
+
+**On Windows that path did not work for us.** On a Windows 11 PC with Claude Code 2.1.316 (the docs require 2.1.280 or later) and the Claude desktop app 4.4212, in November 2026, the folder appeared in the Remote Control list. Cloud sessions reported it as *"not available ... on Windows, [the app needs] a version that serves folders there"*. So a cloud session had no way into the PC.
+
+There are other reasons to want it anyway:
+
+- Remote Control needs the Claude app or `claude remote-control` running on the PC, and each connection is approved one folder at a time.
+- This bridge needs only Windows' own OpenSSH service and Tailscale. A session reaches the whole PC: any folder, any drive, PowerShell and installed programs.
+
+On Linux or Mac a plain SSH setup takes about five minutes. Windows is where it gets hard:
+
+- OpenSSH Server has to be installed and configured.
+- Host-key ACLs crash the service (error 1067).
+- A bash shell is needed so commands behave the same as on Linux.
+- The firewall has to be locked to your tailnet.
+
+This repo is that recipe, tested end to end.
 
 ```
 cloud VM ──Tailscale (userspace)──▶ your PC: OpenSSH (Tailscale IP only) ──▶ Git Bash as you
@@ -20,7 +38,7 @@ Tested from two fresh cloud VMs: `whoami`, `hostname` and PowerShell work, and a
 
 ## When to use it
 
-- **The PC needs no Claude app running.** It only needs the `sshd` service and Tailscale. Anthropic's built-in Remote Control / folder connection needs the Claude app or `claude remote-control` running on the machine. If that works for you, it is simpler.
+- **Remote Control's folder connection doesn't work on your Windows PC**, or you don't want the Claude app running there. If it does work for you, it is simpler than this bridge.
 - **Start work from your phone or any browser.** Your PC keeps the master files.
 - **Not tied to Claude.** The hook is Claude Code specific, but `bin/` and `windows/setup-pc.ps1` work for any CI job, agent or script that can run bash on Linux.
 
